@@ -7,21 +7,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"zyme/internal/model"
 )
 
-// WriteNode writes n's markdown to <vault>/_zyme/<short-id>.md with zyme frontmatter.
-// Returns the absolute path written.
-func WriteNode(vaultPath string, n model.Node, markdown string) (string, error) {
+// WriteNode writes a node's markdown to <vault>/_zyme/<short-id>.md with zyme frontmatter.
+// Takes primitives so it does not depend on the model package. Returns the path written.
+func WriteNode(vaultPath, id, kind, role, sourceURI, markdown string) (string, error) {
 	dir := filepath.Join(vaultPath, "_zyme")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create _zyme dir: %w", err)
 	}
-	path := filepath.Join(dir, shortID(n.ID)+".md")
+	path := filepath.Join(dir, shortID(id)+".md")
 
 	front := fmt.Sprintf("---\nzyme_id: %s\nkind: %s\nrole: %s\nsource_uri: %q\n---\n\n",
-		n.ID, n.Kind, n.Role, n.SourceURI)
+		id, kind, role, sourceURI)
 
 	if err := os.WriteFile(path, []byte(front+markdown), 0o644); err != nil {
 		return "", fmt.Errorf("write materialized file: %w", err)

@@ -1,4 +1,4 @@
-// Command zyme is the Zyme CLI. Subcommands: migrate, ingest, nodes, materialize.
+// Command zyme is the Zyme CLI. Subcommands: migrate, ingest, nodes, sync, materialize.
 package main
 
 import (
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -28,8 +29,8 @@ func newRootCmd() *cobra.Command {
 		Use:   "zyme",
 		Short: "Zyme — parasitic data middleware",
 	}
-	reg := ingest.NewRegistry(ingest.Web{}, ingest.RSS{})
-	root.AddCommand(migrateCmd(), ingestCmd(reg), nodesCmd(), materializeCmd())
+	reg := ingest.NewRegistry(ingest.Web{}, ingest.RSS{}, ingest.GitHub{})
+	root.AddCommand(migrateCmd(), ingestCmd(reg), nodesCmd(), syncCmd(), materializeCmd())
 	return root
 }
 
@@ -59,9 +60,10 @@ func migrateCmd() *cobra.Command {
 
 func ingestCmd(reg *ingest.Registry) *cobra.Command {
 	var adapter, url string
+	var limit int
 	c := &cobra.Command{
 		Use:   "ingest",
-		Short: "Ingest a source via an adapter (web, rss): fetch -> extract -> embed -> store",
+		Short: "Ingest a source via an adapter (web, rss, github): fetch -> extract -> embed -> store",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load()
 			if err != nil {
@@ -83,7 +85,11 @@ func ingestCmd(reg *ingest.Registry) *cobra.Command {
 				SnapshotDir: cfg.SnapshotDir,
 			}
 
-			payloads, err := a.Fetch(ctx, ingest.SourceRef{Adapter: adapter, URI: url})
+			ref := ingest.SourceRef{Adapter: adapter, URI: url}
+			if limit > 0 {
+				ref.Options = map[string]string{"limit": strconv.Itoa(limit)}
+			}
+			payloads, err := a.Fetch(ctx, ref)
 			if err != nil {
 				return err
 			}
@@ -109,8 +115,9 @@ func ingestCmd(reg *ingest.Registry) *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().StringVar(&adapter, "adapter", "web", "source adapter: web, rss")
-	c.Flags().StringVar(&url, "url", "", "source URL (required)")
+	c.Flags().StringVar(&adapter, "adapter", "web", "source adapter: web, rss, github")
+	c.Flags().StringVar(&url, "url", "", "source URL or target (e.g. 'starred' for github)")
+	c.Flags().IntVar(&limit, "limit", 0, "max items to ingest (0 = all)")
 	_ = c.MarkFlagRequired("url")
 	return c
 }
@@ -138,20 +145,19 @@ func nodesCmd() *cobra.Command {
 				fmt.Println("(no nodes)")
 				return nil
 			}
-			fmt.Printf("%-16s %-10s %-10s %s\n", "ID", "KIND", "ROLE", "SOURCE_URI")
+			fmt.Printf("%-14s %-10s %-10s %s\n", "ID", "KIND", "ROLE", "SOURCE_URI")
 			for _, n := range ns {
-				fmt.Printf("%-16s %-10s %-10s %s\n", short(n.ID), n.Kind, n.Role, n.SourceURI)
+				fmt.Printf("%-14s %-10s %-10s %s\n", short(n.ID), n.Kind, n.Role, n.SourceURI)
 			}
 			return nil
 		},
 	}
 }
 
-func materializeCmd() *cobra.Command {
-	var id string
-	c := &cobra.Command{
-		Use:   "materialize",
-		Short: "Write a node's content as markdown into <vault>/_zyme/",
+func syncCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync",
+		Short: "Materialize all source/derived nodes into <vault>/_zyme/",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load()
 			if err != nil {
@@ -166,7 +172,43 @@ func materializeCmd() *cobra.Command {
 				return err
 			}
 			defer s.Close()
+			rows, err := s.AllContents(ctx)
+			if err != nil {
+				return err
+			}
+			n := 0
+			for _, r := range rows {
+				if _, err := materialize.WriteNode(cfg.VaultPath, r.ID, r.Kind, r.Role, r.SourceURI, r.Markdown); err != nil {
+					log.Printf("skip %s: %v", short(r.ID), err)
+					continue
+				}
+				n++
+			}
+			log.Printf("synced %d/%d nodes -> %s/_zyme/", n, len(rows), cfg.VaultPath)
+			return nil
+		},
+	}
+}
 
+func materializeCmd() *cobra.Command {
+	var id string
+	c := &cobra.Command{
+		Use:   "materialize",
+		Short: "Write one node's content as markdown into <vault>/_zyme/",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			if cfg.VaultPath == "" {
+				return fmt.Errorf("ZYME_VAULT is not set")
+			}
+			ctx := context.Background()
+			s, err := store.Open(ctx, cfg.PostgresDSN)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
 			n, err := s.GetNode(ctx, id)
 			if err != nil {
 				return fmt.Errorf("get node: %w", err)
@@ -175,7 +217,7 @@ func materializeCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("latest version: %w", err)
 			}
-			path, err := materialize.WriteNode(cfg.VaultPath, n, v.Markdown)
+			path, err := materialize.WriteNode(cfg.VaultPath, n.ID, string(n.Kind), string(n.Role), n.SourceURI, v.Markdown)
 			if err != nil {
 				return err
 			}

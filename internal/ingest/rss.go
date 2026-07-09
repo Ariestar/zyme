@@ -67,11 +67,13 @@ func stripTags(s string) string {
 	return strings.TrimSpace(s)
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
 	}
-	return b
+	return ""
 }
 
 func firstTime(ts ...*time.Time) time.Time {

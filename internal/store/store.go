@@ -37,7 +37,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return nil
 }
 
-// InsertNode upserts a node by id (idempotent re-ingest of the same content).
+// InsertNode upserts a node by id (idempotent re-ingest of the same source).
 func (s *Store) InsertNode(ctx context.Context, n model.Node) error {
 	_, err := s.Pool.Exec(ctx,
 		`INSERT INTO node (id, kind, role, source_uri)
@@ -102,6 +102,34 @@ func (s *Store) ListNodes(ctx context.Context, limit int) ([]model.Node, error) 
 			return nil, err
 		}
 		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// ContentRow is a node plus its latest version's markdown — what materialize needs.
+type ContentRow struct {
+	ID, Kind, Role, SourceURI, Markdown string
+}
+
+// AllContents returns every source/derived node with its latest-version markdown,
+// for full-mirror materialization (zyme sync). pending/archived are excluded.
+func (s *Store) AllContents(ctx context.Context) ([]ContentRow, error) {
+	rows, err := s.Pool.Query(ctx,
+		`SELECT DISTINCT ON (n.id) n.id, n.kind, n.role, COALESCE(n.source_uri,''), COALESCE(v.markdown,'')
+		 FROM node n JOIN node_version v ON v.node_id = n.id
+		 WHERE n.role IN ('source','derived')
+		 ORDER BY n.id, v.version DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ContentRow
+	for rows.Next() {
+		var r ContentRow
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Role, &r.SourceURI, &r.Markdown); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
