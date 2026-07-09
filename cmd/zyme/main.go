@@ -108,6 +108,13 @@ func ingestCmd(reg *ingest.Registry) *cobra.Command {
 					log.Printf("[%d/%d] unchanged: %s (v%d)", i+1, len(payloads), short(id), ver)
 				} else {
 					stored++
+					// Auto-materialize: every stored node lands in the vault too.
+					// pool and vault are always in sync — the vault is the user-visible face.
+					if cfg.VaultPath != "" {
+						if _, merr := materialize.WriteNode(cfg.VaultPath, id, p.Kind, "source", p.SourceURI, p.Markdown); merr != nil {
+							log.Printf("[%d/%d] materialize error: %v", i+1, len(payloads), merr)
+						}
+					}
 					log.Printf("[%d/%d] stored: %s v%d — %s", i+1, len(payloads), short(id), ver, p.Title)
 				}
 			}

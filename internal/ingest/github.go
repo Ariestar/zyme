@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,11 +17,15 @@ import (
 // One repo -> one node (Kind "star"), identity = repo URL (live: README updates over time).
 // Track B = README text (fallback: description); Track A = repo metadata JSON.
 //
-// Requires ZYME_GITHUB_TOKEN (a PAT with read:user / public_repo).
-// Optional: ref.Options["limit"] caps the count (useful for a first test).
+// Requires ZYME_GITHUB_TOKEN (a PAT). Optional: ref.Options["limit"] caps the count.
+// READMEs are fetched concurrently (GitHub API latency dominates) with a per-request
+// timeout so one slow repo can't stall the batch.
 type GitHub struct{}
 
 func (GitHub) ID() string { return "github" }
+
+// ghHTTP has a timeout so a single stalled request can't hang the whole batch.
+var ghHTTP = &http.Client{Timeout: 30 * time.Second}
 
 func (GitHub) Fetch(ctx context.Context, ref SourceRef) ([]IngestPayload, error) {
 	token := firstNonEmpty(ref.Options["token"], os.Getenv("ZYME_GITHUB_TOKEN"))
@@ -42,13 +47,26 @@ func (GitHub) Fetch(ctx context.Context, ref SourceRef) ([]IngestPayload, error)
 		return nil, err
 	}
 
-	out := make([]IngestPayload, 0, len(repos))
-	for i, repo := range repos {
-		if limit > 0 && i >= limit {
-			break
-		}
-		out = append(out, ghRepoPayload(ctx, token, repo, time.Now()))
+	n := len(repos)
+	if limit > 0 && limit < n {
+		n = limit
 	}
+
+	// Fetch READMEs concurrently. ghRepoPayload never errors (falls back to
+	// description), so each goroutine just writes its own index — no mutex needed.
+	out := make([]IngestPayload, n)
+	sem := make(chan struct{}, 10)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[i] = ghRepoPayload(ctx, token, repos[i], time.Now())
+		}(i)
+	}
+	wg.Wait()
 	return out, nil
 }
 
@@ -62,7 +80,6 @@ func ghRepoPayload(ctx context.Context, token string, repo ghRepo, now time.Time
 	readme := ghReadme(ctx, token, repo.FullName)
 	body := firstNonEmpty(readme, repo.Description, repo.FullName)
 	md := "# " + repo.FullName + "\n\n" + body + "\n\n_Source: " + repo.HTMLURL + "_"
-
 	snap, _ := json.Marshal(repo)
 	return IngestPayload{
 		Identity:      contentHash(repo.HTMLURL),
@@ -88,8 +105,7 @@ func ghList(ctx context.Context, token, url string) ([]ghRepo, error) {
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Accept", "application/vnd.github+json")
-
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := ghHTTP.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("github api: %w", err)
 		}
@@ -119,7 +135,7 @@ func ghReadme(ctx context.Context, token, repo string) string {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github.raw")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := ghHTTP.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
 			resp.Body.Close()
