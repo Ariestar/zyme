@@ -1,0 +1,17 @@
+# Dev vault (Obsidian vault used as Zyme materialization target)
+/vault/
+
+# Track A snapshot blobs
+/data/
+
+# Local config with secrets
+.env
+
+# Go build output
+/bin/
+*.exe
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
