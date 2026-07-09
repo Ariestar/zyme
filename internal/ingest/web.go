@@ -1,35 +1,33 @@
-// Package ingest contains source adapters that turn external data into a
-// standard payload (Track A snapshot + Track B cleaned text).
 package ingest
 
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
+	"time"
 
 	"github.com/go-shiori/go-readability"
 )
 
-// WebResult is the standard payload from fetching a web URL.
-type WebResult struct {
-	URL         string
-	NodeID      string // sha256(html): content-addressed identity for frozen nodes
-	Title       string
-	Markdown    string // Track B cleaned text (starts with "# <title>" when available)
-	HTML        []byte // Track A raw (MHTML packaging is a TODO; raw HTML stored for now)
-	SnapshotKey string // NodeID + ".html"
+// Web adapter: fetch a single URL and extract its main text via readability.
+// Track A = raw HTML bytes (written by Pipeline); Track B = extracted markdown.
+// Note: plain HTTP only — JS-rendered pages need a headless variant (TODO).
+type Web struct{}
+
+func (Web) ID() string { return "web" }
+
+func (Web) Fetch(ctx context.Context, ref SourceRef) ([]IngestPayload, error) {
+	p, err := fetchWeb(ctx, ref.URI)
+	if err != nil {
+		return nil, err
+	}
+	return []IngestPayload{*p}, nil
 }
 
-// FetchWeb downloads rawURL, extracts main text (readability), and writes a
-// content-addressed snapshot of the raw HTML to snapshotDir (Track A).
-func FetchWeb(ctx context.Context, rawURL, snapshotDir string) (*WebResult, error) {
+func fetchWeb(ctx context.Context, rawURL string) (*IngestPayload, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -57,33 +55,40 @@ func FetchWeb(ctx context.Context, rawURL, snapshotDir string) (*WebResult, erro
 		return nil, fmt.Errorf("extract text: %w", err)
 	}
 
-	sum := sha256.Sum256(html)
-	nodeID := hex.EncodeToString(sum[:])
-	key := nodeID + ".html"
-	if err := saveSnapshot(snapshotDir, key, html); err != nil {
-		return nil, err
-	}
-
 	md := article.TextContent
 	if article.Title != "" {
 		md = "# " + article.Title + "\n\n" + md
 	}
-	return &WebResult{
-		URL:         rawURL,
-		NodeID:      nodeID,
-		Title:       article.Title,
-		Markdown:    md,
-		HTML:        html,
-		SnapshotKey: key,
+	// Identity = canonical URL, NOT hash(html): raw HTML drifts between fetches
+	// (timestamps, "last edited", ads), which would otherwise spawn duplicate nodes.
+	// Dedup still happens via markdown comparison in Pipeline.Save.
+	return &IngestPayload{
+		Identity:      contentHash(canonicalURL(rawURL)),
+		IdentityBasis: "uri",
+		Kind:          "page",
+		SourceURI:     rawURL,
+		Title:         article.Title,
+		Markdown:      md,
+		Snapshot:      html,
+		SnapshotMIME:  "text/html",
+		FetchedAt:     time.Now(),
+		AdapterID:     "web",
 	}, nil
 }
 
-func saveSnapshot(dir, key string, data []byte) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create snapshot dir: %w", err)
+// canonicalURL strips fragments and common tracking params so the same article
+// reached via different links still maps to one node.
+func canonicalURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
 	}
-	if err := os.WriteFile(filepath.Join(dir, key), data, 0o644); err != nil {
-		return fmt.Errorf("write snapshot: %w", err)
+	u.Fragment = ""
+	u.RawFragment = ""
+	q := u.Query()
+	for _, k := range []string{"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"} {
+		q.Del(k)
 	}
-	return nil
+	u.RawQuery = q.Encode()
+	return u.String()
 }
