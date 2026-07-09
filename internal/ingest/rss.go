@@ -34,13 +34,17 @@ func (RSS) Fetch(ctx context.Context, ref SourceRef) ([]IngestPayload, error) {
 		if guid == "" {
 			continue // no stable identity; skip
 		}
+		md := stripTags(html)
+		if item.Title != "" {
+			md = "# " + item.Title + "\n\n" + md
+		}
 		out = append(out, IngestPayload{
 			Identity:      contentHash(guid),
 			IdentityBasis: "guid",
 			Kind:          "feed_item",
 			SourceURI:     firstNonEmpty(item.Link, ref.URI),
 			Title:         item.Title,
-			Markdown:      stripTags(html),
+			Markdown:      md,
 			Snapshot:      []byte(html),
 			SnapshotMIME:  "text/html",
 			FetchedAt:     firstTime(item.PublishedParsed, item.UpdatedParsed),
